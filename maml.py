@@ -21,12 +21,11 @@ from torch.utils.data import Dataset
 class Net(nn.Module):
     def __init__(self):
         super(Net, self).__init__()
-        self.roberta = torch.hub.load('pytorch/fairseq', 'roberta.large')
+        # self.roberta = torch.hub.load('pytorch/fairseq', 'roberta.large')
         self.fc1 = nn.Linear(1024, 512)
         self.fc2 = nn.Linear(512, 1)
 
     def forward(self, x):
-        x = self.roberta.encode(*x)
         x = F.relu(self.fc1(x))
         x = self.fc2(x)
         return F.sigmoid(x)
@@ -41,16 +40,23 @@ def accuracy(predictions, targets):
 class TestDataset(Dataset):
    
     def __init__(self, text_dataset, transform=None):
-        self.text_dataset = text_dataset
+        self.text_dataset = text_dataset[:20]
         self.transform = transform
+        self.roberta = torch.hub.load('pytorch/fairseq', 'roberta.large')
 
     def __len__(self):
-        return len(self.text_dataset)
+        return 19
+        # return len(self.text_dataset)
 
     def __getitem__(self, idx):
+        
         sample = [' '.join(getattr(self.text_dataset[idx], 'text')), int(getattr(self.text_dataset[idx], 'label') == 'positive')]
-        if self.transform:
-            sample = self.transform(sample)
+        label = sample[1]
+        data_tokens = self.roberta.encode(sample[0])
+        data = self.roberta.extract_features(data_tokens)
+        sample = (data, label)
+        # if self.transform:
+        #     sample = self.transform(sample)
         return sample
 
 
@@ -58,10 +64,10 @@ class TestDataset(Dataset):
 def main(lr=0.005, maml_lr=0.01, iterations=1000, ways=5, shots=1, tps=32, fas=5, device=torch.device("cpu"),
          download_location='~/data'):
 
-    x = torchtext.datasets.SST("/Users/johndang/Downloads/trees/train.txt", torchtext.data.Field(lower=False), torchtext.data.Field(sequential=False))
-    transformations = transforms.Compose([
-        transforms.ToTensor()
-    ])
+    x = torchtext.datasets.SST("/Users/johndang/Downloads/trees/test.txt", torchtext.data.Field(lower=False), torchtext.data.Field(sequential=False))
+    # transformations = transforms.Compose([
+    #     transforms.ToTensor()
+    # ])
 
     train = l2l.data.MetaDataset(TestDataset(x, transform=None))
 
@@ -72,10 +78,10 @@ def main(lr=0.005, maml_lr=0.01, iterations=1000, ways=5, shots=1, tps=32, fas=5
                                             l2l.data.transforms.RemapLabels(train),
                                             l2l.data.transforms.ConsecutiveLabels(train),
                                        ],
-                                       num_tasks=1000)
+                                       num_tasks=100)
 
     model = Net()
-    model.to(device)
+    # model.to(device)
     meta_model = l2l.algorithms.MAML(model, lr=maml_lr)
     opt = optim.Adam(meta_model.parameters(), lr=lr)
     loss_func = nn.NLLLoss(reduction='mean')
@@ -87,7 +93,7 @@ def main(lr=0.005, maml_lr=0.01, iterations=1000, ways=5, shots=1, tps=32, fas=5
             learner = meta_model.clone()
             train_task = train_tasks.sample()
             data, labels = train_task
-            data = data.to(device)
+            # data = data.to(device)
             labels = labels.to(device)
 
             # Separate data into adaptation/evalutation sets
