@@ -11,57 +11,70 @@ from torchvision.datasets import MNIST
 
 import learn2learn as l2l
 
+import torchtext
+from torchtext.datasets import text_classification
+
+from torch.utils.data import Dataset
+
+
 
 class Net(nn.Module):
-    def __init__(self, ways=3):
+    def __init__(self):
         super(Net, self).__init__()
-        self.conv1 = nn.Conv2d(1, 20, 5, 1)
-        self.conv2 = nn.Conv2d(20, 50, 5, 1)
-        self.fc1 = nn.Linear(4 * 4 * 50, 500)
-        self.fc2 = nn.Linear(500, ways)
+        self.roberta = torch.hub.load('pytorch/fairseq', 'roberta.large')
+        self.fc1 = nn.Linear(1024, 512)
+        self.fc2 = nn.Linear(512, 1)
 
     def forward(self, x):
-        x = F.relu(self.conv1(x))
-        x = F.max_pool2d(x, 2, 2)
-        x = F.relu(self.conv2(x))
-        x = F.max_pool2d(x, 2, 2)
-        x = x.view(-1, 4 * 4 * 50)
+        x = self.roberta.encode(*x)
         x = F.relu(self.fc1(x))
         x = self.fc2(x)
-        return F.log_softmax(x, dim=1)
-
+        return F.sigmoid(x)
 
 def accuracy(predictions, targets):
-    predictions = predictions.argmax(dim=1)
+    predictions = predictions > 0.5
     acc = (predictions == targets).sum().float()
     acc /= len(targets)
     return acc.item()
 
 
+class TestDataset(Dataset):
+   
+    def __init__(self, text_dataset, transform=None):
+        self.text_dataset = text_dataset
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.text_dataset)
+
+    def __getitem__(self, idx):
+        sample = [' '.join(getattr(self.text_dataset[idx], 'text')), int(getattr(self.text_dataset[idx], 'label') == 'positive')]
+        if self.transform:
+            sample = self.transform(sample)
+        return sample
+
+
+
 def main(lr=0.005, maml_lr=0.01, iterations=1000, ways=5, shots=1, tps=32, fas=5, device=torch.device("cpu"),
          download_location='~/data'):
+
+    x = torchtext.datasets.SST("/Users/johndang/Downloads/trees/train.txt", torchtext.data.Field(lower=False), torchtext.data.Field(sequential=False))
     transformations = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize((0.1307,), (0.3081,)),
-        lambda x: x.view(1, 28, 28),
+        transforms.ToTensor()
     ])
 
-    mnist_train = l2l.data.MetaDataset(MNIST(download_location,
-                                             train=True,
-                                             download=True,
-                                             transform=transformations))
+    train = l2l.data.MetaDataset(TestDataset(x, transform=None))
 
-    train_tasks = l2l.data.TaskDataset(mnist_train,
+    train_tasks = l2l.data.TaskDataset(train,
                                        task_transforms=[
-                                            l2l.data.transforms.NWays(mnist_train, ways),
-                                            l2l.data.transforms.KShots(mnist_train, 2*shots),
-                                            l2l.data.transforms.LoadData(mnist_train),
-                                            l2l.data.transforms.RemapLabels(mnist_train),
-                                            l2l.data.transforms.ConsecutiveLabels(mnist_train),
+                                            l2l.data.transforms.KShots(train, 2*shots),
+                                            l2l.data.transforms.LoadData(train),
+                                            l2l.data.transforms.RemapLabels(train),
+                                            l2l.data.transforms.ConsecutiveLabels(train),
                                        ],
                                        num_tasks=1000)
 
-    model = Net(ways)
+    model = Net()
     model.to(device)
     meta_model = l2l.algorithms.MAML(model, lr=maml_lr)
     opt = optim.Adam(meta_model.parameters(), lr=lr)
