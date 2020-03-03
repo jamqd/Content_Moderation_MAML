@@ -6,8 +6,6 @@ import torch
 from torch import nn, optim
 from torch.nn import functional as F
 from torch.utils.data import DataLoader
-from torchvision import transforms
-from torchvision.datasets import MNIST
 
 import learn2learn as l2l
 
@@ -21,11 +19,23 @@ from torch.utils.data import Dataset
 class Net(nn.Module):
     def __init__(self):
         super(Net, self).__init__()
-        # self.roberta = torch.hub.load('pytorch/fairseq', 'roberta.large')
+        self.roberta = torch.hub.load('pytorch/fairseq', 'roberta.large').model
         self.fc1 = nn.Linear(1024, 512)
         self.fc2 = nn.Linear(512, 1)
 
     def forward(self, x):
+        tokens = self.roberta.encode(x)
+        if tokens.dim() == 1:
+            tokens = tokens.unsqueeze(0)
+        if tokens.size(-1) > self.roberta.max_positions():
+            raise ValueError('tokens exceeds maximum length: {} > {}'.format(
+                tokens.size(-1), self.roberta.max_positions()
+            ))
+        x, extra = self.roberta(
+            tokens,
+            features_only=True,
+            return_all_hiddens=False,
+        )
         x = F.relu(self.fc1(x))
         x = self.fc2(x)
         return F.sigmoid(x)
@@ -40,31 +50,31 @@ def accuracy(predictions, targets):
 class TestDataset(Dataset):
    
     def __init__(self, text_dataset, transform=None):
-        self.text_dataset = text_dataset[:20]
+        self.text_dataset = text_dataset
         self.transform = transform
-        self.roberta = torch.hub.load('pytorch/fairseq', 'roberta.large')
+        # self.roberta = torch.hub.load('pytorch/fairseq', 'roberta.large')
+        # print(type(self.roberta.model))
 
     def __len__(self):
-        return 19
-        # return len(self.text_dataset)
+        return len(self.text_dataset)
 
     def __getitem__(self, idx):
         
-        sample = [' '.join(getattr(self.text_dataset[idx], 'text')), int(getattr(self.text_dataset[idx], 'label') == 'positive')]
-        label = sample[1]
-        data_tokens = self.roberta.encode(sample[0])
-        data = self.roberta.extract_features(data_tokens)
-        sample = (data, label)
+        sample = (' '.join(getattr(self.text_dataset[idx], 'text')), int(getattr(self.text_dataset[idx], 'label') == 'positive'))
+        # label = sample[1]
+        # data_tokens = self.roberta.encode(sample[0])
+        # data = self.roberta.extract_features(data_tokens)
+        # sample = (data, label)
         # if self.transform:
         #     sample = self.transform(sample)
         return sample
 
 
 
-def main(lr=0.005, maml_lr=0.01, iterations=1000, ways=5, shots=1, tps=32, fas=5, device=torch.device("cpu"),
+def main(lr=0.005, maml_lr=0.01, iterations=1000, ways=2, shots=1, tps=32, fas=5, device=torch.device("cpu"),
          download_location='~/data'):
 
-    x = torchtext.datasets.SST("/Users/johndang/Downloads/trees/test.txt", torchtext.data.Field(lower=False), torchtext.data.Field(sequential=False))
+    x = torchtext.datasets.SST("/Users/arjuns/Downloads/trees/test.txt", torchtext.data.Field(lower=False), torchtext.data.Field(sequential=False))
     # transformations = transforms.Compose([
     #     transforms.ToTensor()
     # ])
@@ -73,12 +83,14 @@ def main(lr=0.005, maml_lr=0.01, iterations=1000, ways=5, shots=1, tps=32, fas=5
 
     train_tasks = l2l.data.TaskDataset(train,
                                        task_transforms=[
+                                            l2l.data.transforms.NWays(train, n=ways),
                                             l2l.data.transforms.KShots(train, 2*shots),
                                             l2l.data.transforms.LoadData(train),
-                                            l2l.data.transforms.RemapLabels(train),
-                                            l2l.data.transforms.ConsecutiveLabels(train),
+                                            # l2l.data.transforms.RemapLabels(train),
+                                            # l2l.data.transforms.ConsecutiveLabels(train),
                                        ],
-                                       num_tasks=100)
+                                       num_tasks=10)
+    print(train_tasks.sample_task_description())
 
     model = Net()
     # model.to(device)
@@ -97,7 +109,7 @@ def main(lr=0.005, maml_lr=0.01, iterations=1000, ways=5, shots=1, tps=32, fas=5
             labels = labels.to(device)
 
             # Separate data into adaptation/evalutation sets
-            adaptation_indices = np.zeros(data.size(0), dtype=bool)
+            adaptation_indices = np.zeros(len(data), dtype=bool)
             adaptation_indices[np.arange(shots*ways) * 2] = True
             evaluation_indices = torch.from_numpy(~adaptation_indices)
             adaptation_indices = torch.from_numpy(adaptation_indices)
