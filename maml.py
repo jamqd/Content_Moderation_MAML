@@ -17,9 +17,13 @@ from torch.utils.data import Dataset
 
 
 class Net(nn.Module):
-    def __init__(self, roberta):
+    def __init__(self, roberta, finetune=False):
         super(Net, self).__init__()
         self.roberta = roberta.model
+        if not finetune:
+            for param in self.roberta.parameters():
+                param.requires_grad = False
+
         self.fc1 = nn.Linear(1024, 512)
         self.fc2 = nn.Linear(512, 2)
 
@@ -56,9 +60,8 @@ def accuracy(predictions, targets):
 
 class TestDataset(Dataset):
    
-    def __init__(self, text_dataset, transform=None):
+    def __init__(self, text_dataset):
         self.text_dataset = text_dataset
-        self.transform = transform
 
     def __len__(self):
         return len(self.text_dataset)
@@ -66,12 +69,7 @@ class TestDataset(Dataset):
     def __getitem__(self, idx):
         tokens = getattr(self.text_dataset[idx], 'text')
         labels = int(getattr(self.text_dataset[idx], 'label') == 'positive')
-        sample = (tokens, labels)
-        # if self.transform:
-        #     sample = self.transform(sample)
-        return sample
-
-
+        return (tokens, labels)
 
 def main(lr=0.005, maml_lr=0.01, iterations=1000, ways=2, shots=1, tps=32, fas=5, device=torch.device("cpu"),
          download_location='~/data'):
@@ -79,9 +77,6 @@ def main(lr=0.005, maml_lr=0.01, iterations=1000, ways=2, shots=1, tps=32, fas=5
     roberta = torch.hub.load('pytorch/fairseq', 'roberta.large')
 
     x = torchtext.datasets.SST("/Users/arjuns/Downloads/trees/test.txt", torchtext.data.Field(sequential=False), torchtext.data.Field(sequential=False))
-    # transformations = transforms.Compose([
-    #     transforms.ToTensor()
-    # ])
 
     train = l2l.data.MetaDataset(TestDataset(x, transform=None))
 
@@ -130,7 +125,7 @@ def main(lr=0.005, maml_lr=0.01, iterations=1000, ways=2, shots=1, tps=32, fas=5
             # Fast Adaptation
             for step in range(fas):
                 train_error = loss_func(learner(adaptation_data), adaptation_labels)
-                learner.adapt(train_error)
+                learner.adapt(train_error, allow_unused=True, allow_nograd=True)
 
             # Compute validation loss
             predictions = learner(evaluation_data)
