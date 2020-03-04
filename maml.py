@@ -21,7 +21,7 @@ class Net(nn.Module):
         super(Net, self).__init__()
         self.roberta = roberta.model
         self.fc1 = nn.Linear(1024, 512)
-        self.fc2 = nn.Linear(512, 1)
+        self.fc2 = nn.Linear(512, 2)
 
     def forward(self, tokens_list):
         sentence_embeddings = []
@@ -45,11 +45,10 @@ class Net(nn.Module):
 
         x = F.relu(self.fc1(x))
         x = self.fc2(x)
-        x = F.sigmoid(x)
-        return torch.squeeze(x)
+        return x
 
 def accuracy(predictions, targets):
-    predictions = predictions > 0.5
+    predictions = predictions.argmax(dim=1)
     acc = (predictions == targets).sum().float()
     acc /= len(targets)
     return acc.item()
@@ -122,16 +121,14 @@ def main(lr=0.005, maml_lr=0.01, iterations=1000, ways=2, shots=1, tps=32, fas=5
 
             adaptation_data, adaptation_labels = data[adaptation_indices], labels[adaptation_indices]
             adaptation_data = [roberta.encode(elem) for elem in adaptation_data]
-            # adaptation_labels = torch.Tensor(adaptation_labels).view(len(adaptation_labels), 1)
+            adaptation_labels = torch.LongTensor(adaptation_labels)
 
             evaluation_data, evaluation_labels = data[evaluation_indices], labels[evaluation_indices]
             evaluation_data = [roberta.encode(elem) for elem in evaluation_data]
-            # evaluation_labels = torch.Tensor(evaluation_labels).view(len(evaluation_labels), 1)
+            evaluation_labels = torch.LongTensor(evaluation_labels)
 
             # Fast Adaptation
             for step in range(fas):
-                print(learner(adaptation_data).shape)
-                print(adaptation_labels.shape)
                 train_error = loss_func(learner(adaptation_data), adaptation_labels)
                 learner.adapt(train_error)
 
