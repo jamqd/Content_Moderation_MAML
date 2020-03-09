@@ -1,5 +1,8 @@
+# sudo CFLAGS=-stdlib=libc++ python3 maml.py
+
 import argparse
 import random
+import pandas as pd
 
 import numpy as np
 import torch
@@ -13,8 +16,6 @@ import torchtext
 from torchtext.datasets import text_classification
 
 from torch.utils.data import Dataset
-
-
 
 class Net(nn.Module):
     def __init__(self, roberta, finetune=False):
@@ -58,37 +59,104 @@ def accuracy(predictions, targets):
     return acc.item()
 
 
-class TestDataset(Dataset):
+class MAMLDataset(Dataset):
    
-    def __init__(self, text_dataset):
-        self.text_dataset = text_dataset
+    def __init__(self, dataset_name):
+        self.dataset = None
+        self.dataset_name = dataset_name
+        if dataset_name == 'SST':
+            self.dataset = torchtext.datasets.SST("./269_datasets/SST/train.txt", torchtext.data.Field(sequential=False), torchtext.data.Field(sequential=False))
+        elif dataset_name == 'toxic_comment':
+            self.dataset = pd.read_csv("./269_datasets/jigsaw-toxic-comment-classification-challenge/train.csv")
+        elif dataset_name == '4054689':
+            comments = pd.read_csv("./269_datasets/4054689/attack_annotated_comments.tsv", sep='\t')
+            annotations = pd.read_csv("./269_datasets/4054689/attack_annotations.tsv", sep='\t')
+            self.dataset = comments.merge(annotations, how='inner', on='rev_id')
+        elif dataset_name == 'detecting-insults-in-social-commentary':
+            self.dataset = pd.read_csv("./269_datasets/detecting-insults-in-social-commentary/train.csv")
+        elif dataset_name == 'GermEval-2018-Data-master':
+            self.dataset = None
+        elif dataset_name == 'hate-speech-and-offensive-language':
+            self.dataset = pd.read_csv("./269_datasets/hate-speech-and-offensive-language/labeled_data.csv")
+        elif dataset_name == 'hate-speech-dataset-master':
+            annotations_metadata = pd.read_csv("./269_datasets/hate-speech-dataset-master/annotations_metadata.csv")
+            ids = []
+            comments = []
+            for index, row in annotations_metadata.iterrows():
+                with open("./269_datasets/hate-speech-dataset-master/all_files/" + row['file_id'] + ".txt") as f:
+                    ids.append(row['file_id'])
+                    comments.append(f.read().strip())
+            comments_data = pd.DataFrame.from_dict({'file_id' : ids, 'comment' : comments})
+            self.dataset = annotations_metadata.merge(comments_data, how='inner', on='file_id')
+        elif dataset_name == 'IWG_hatespeech_public-master':
+            self.dataset = pd.read_csv('./269_datasets/IWG_hatespeech_public-master/german hatespeech refugees.csv')
+        elif dataset_name == 'quora-insincere-questions-classification':
+            self.dataset = pd.read_csv('./269_datasets/quora-insincere-questions-classification/train.csv')
+        elif dataset_name == 'twitter-sentiment-analysis-hatred-speech':
+            self.dataset = pd.read_csv('./269_datasets/twitter-sentiment-analysis-hatred-speech/train.csv')
+
+        if dataset_name != 'SST':
+            print(self.dataset.iloc[0])
 
     def __len__(self):
-        return len(self.text_dataset)
+        return len(self.dataset)
 
     def __getitem__(self, idx):
-        tokens = getattr(self.text_dataset[idx], 'text')
-        labels = int(getattr(self.text_dataset[idx], 'label') == 'positive')
+        if self.dataset_name == 'SST':
+            tokens = getattr(self.dataset[idx], 'text')
+            labels = int(getattr(self.dataset[idx], 'label') == 'negative')
+        elif self.dataset_name == 'toxic_comment':
+            tokens = self.dataset.iloc[idx]['comment_text']
+            labels = self.dataset.iloc[idx]['identity_hate']
+        elif self.dataset_name == '4054689':
+            tokens = self.dataset.iloc[idx]['comment']
+            labels = self.dataset.iloc[idx]['attack']
+        elif self.dataset_name == 'detecting-insults-in-social-commentary':
+            tokens = self.dataset.iloc[idx]['Comment']
+            labels = self.dataset.iloc[idx]['Insult']
+        elif self.dataset_name == 'GermEval-2018-Data-master':
+            tokens = None
+            labels = None
+        elif self.dataset_name == 'hate-speech-and-offensive-language':
+            tokens = self.dataset.iloc[idx]['tweet']
+            labels = int(self.dataset.iloc[idx]['class'] == 0)
+        elif self.dataset_name == 'hate-speech-dataset-master':
+            tokens = self.dataset.iloc[idx]['comment']
+            labels = int(self.dataset.iloc[idx]['label'] == 'hate')
+        elif self.dataset_name == 'IWG_hatespeech_public-master':
+            tokens = self.dataset.iloc[idx]['Tweet']
+            labels =int(self.dataset.iloc[idx]['HatespeechOrNot (Expert 1)'] == 'YES')
+        elif self.dataset_name == 'quora-insincere-questions-classification':
+            tokens = self.dataset.iloc[idx]['question_text']
+            labels = self.dataset.iloc[idx]['target']
+        elif self.dataset_name == 'twitter-sentiment-analysis-hatred-speech':
+            tokens = self.dataset.iloc[idx]['tweet']
+            labels = self.dataset.iloc[idx]['label']
+
         return (tokens, labels)
 
-def main(lr=0.005, maml_lr=0.01, iterations=1000, ways=2, shots=1, tps=32, fas=5, device=torch.device("cpu"),
+def main(lr=0.005, maml_lr=0.01, iterations=1000, ways=2, shots=5, tps=32, fas=5, device=torch.device("cpu"),
          download_location='~/data'):
 
     roberta = torch.hub.load('pytorch/fairseq', 'roberta.large')
+    datasets = ['SST', 'toxic_comment', '4054689', 'detecting-insults-in-social-commentary', \
+                'hate-speech-and-offensive-language', 'hate-speech-dataset-master', \
+                'quora-insincere-questions-classification', 'twitter-sentiment-analysis-hatred-speech']
+    iterations = len(datasets)
+    # for iteration in range(iterations):
+    #     train = l2l.data.MetaDataset(MAMLDataset(datasets[iteration]))
 
-    x = torchtext.datasets.SST("/Users/arjuns/Downloads/trees/test.txt", torchtext.data.Field(sequential=False), torchtext.data.Field(sequential=False))
-
-    train = l2l.data.MetaDataset(TestDataset(x, transform=None))
-
-    train_tasks = l2l.data.TaskDataset(train,
-                                       task_transforms=[
-                                            l2l.data.transforms.NWays(train, ways),
-                                            l2l.data.transforms.KShots(train, 2*shots),
-                                            l2l.data.transforms.LoadData(train),
-                                            l2l.data.transforms.RemapLabels(train),
-                                            l2l.data.transforms.ConsecutiveLabels(train),
-                                       ],
-                                       num_tasks=10)
+    #     train_tasks = l2l.data.TaskDataset(train,
+    #                                        task_transforms=[
+    #                                             l2l.data.transforms.NWays(train, ways),
+    #                                             l2l.data.transforms.KShots(train, 2 * shots),
+    #                                             l2l.data.transforms.LoadData(train),
+    #                                             l2l.data.transforms.RemapLabels(train),
+    #                                             l2l.data.transforms.ConsecutiveLabels(train),
+    #                                        ],
+    #                                        num_tasks=50)
+    #     # Sanity check
+    #     train_tasks.sample()
 
     model = Net(roberta)
     # model.to(device)
@@ -99,6 +167,21 @@ def main(lr=0.005, maml_lr=0.01, iterations=1000, ways=2, shots=1, tps=32, fas=5
     for iteration in range(iterations):
         iteration_error = 0.0
         iteration_acc = 0.0
+
+        print('\n\n### Dataset: ' + datasets[iteration] + '###\n\n')
+
+        train = l2l.data.MetaDataset(MAMLDataset(datasets[iteration]))
+
+        train_tasks = l2l.data.TaskDataset(train,
+                                           task_transforms=[
+                                                l2l.data.transforms.NWays(train, ways),
+                                                l2l.data.transforms.KShots(train, 2 * shots),
+                                                l2l.data.transforms.LoadData(train),
+                                                l2l.data.transforms.RemapLabels(train),
+                                                l2l.data.transforms.ConsecutiveLabels(train),
+                                           ],
+                                           num_tasks=50)
+
         for _ in range(tps):
             learner = meta_model.clone()
             train_task = train_tasks.sample()
@@ -115,11 +198,11 @@ def main(lr=0.005, maml_lr=0.01, iterations=1000, ways=2, shots=1, tps=32, fas=5
             labels = np.array(labels)
 
             adaptation_data, adaptation_labels = data[adaptation_indices], labels[adaptation_indices]
-            adaptation_data = [roberta.encode(elem) for elem in adaptation_data]
+            adaptation_data = [roberta.encode(elem)[:roberta.model.max_positions()] for elem in adaptation_data]
             adaptation_labels = torch.LongTensor(adaptation_labels)
 
             evaluation_data, evaluation_labels = data[evaluation_indices], labels[evaluation_indices]
-            evaluation_data = [roberta.encode(elem) for elem in evaluation_data]
+            evaluation_data = [roberta.encode(elem)[:roberta.model.max_positions()] for elem in evaluation_data]
             evaluation_labels = torch.LongTensor(evaluation_labels)
 
             # Fast Adaptation
@@ -150,8 +233,8 @@ if __name__ == '__main__':
 
     parser.add_argument('--ways', type=int, default=2, metavar='N',
                         help='number of ways (default: 2)')
-    parser.add_argument('--shots', type=int, default=1, metavar='N',
-                        help='number of shots (default: 1)')
+    parser.add_argument('--shots', type=int, default=5, metavar='N',
+                        help='number of shots (default: 5)')
     parser.add_argument('-tps', '--tasks-per-step', type=int, default=32, metavar='N',
                         help='tasks per step (default: 32)')
     parser.add_argument('-fas', '--fast-adaption-steps', type=int, default=5, metavar='N',
