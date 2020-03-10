@@ -16,6 +16,7 @@ import torchtext
 from torchtext.datasets import text_classification
 
 from torch.utils.data import Dataset
+from torch.utils.data.dataloader import DataLoader
 
 class Net(nn.Module):
     def __init__(self, roberta, finetune=False):
@@ -26,6 +27,7 @@ class Net(nn.Module):
                 param.requires_grad = False
 
         self.fc1 = nn.Linear(1024, 512)
+        self.bn1 = nn.BatchNorm1d(512)
         self.fc2 = nn.Linear(512, 2)
 
     def forward(self, tokens_list):
@@ -48,7 +50,7 @@ class Net(nn.Module):
         
         x = torch.stack(sentence_embeddings)
 
-        x = F.relu(self.fc1(x))
+        x = F.relu(self.bn1(self.fc1(x)))
         x = self.fc2(x)
         return x
 
@@ -135,42 +137,17 @@ class MAMLDataset(Dataset):
 
         return (tokens, labels)
 
-def main(lr=0.005, maml_lr=0.01, iterations=1000, ways=2, shots=5, tps=32, fas=5, device=torch.device("cpu"),
-         download_location='~/data'):
+def maml(lr=0.005, maml_lr=0.01, iterations=1000, ways=2, shots=5, tps=5, fas=5, device=torch.device("cpu")):
 
     roberta = torch.hub.load('pytorch/fairseq', 'roberta.large')
     datasets = ['SST', 'toxic_comment', '4054689', 'detecting-insults-in-social-commentary', \
                 'hate-speech-and-offensive-language', 'hate-speech-dataset-master', \
                 'quora-insincere-questions-classification', 'twitter-sentiment-analysis-hatred-speech']
-    iterations = len(datasets)
-    # for iteration in range(iterations):
-    #     train = l2l.data.MetaDataset(MAMLDataset(datasets[iteration]))
 
-    #     train_tasks = l2l.data.TaskDataset(train,
-    #                                        task_transforms=[
-    #                                             l2l.data.transforms.NWays(train, ways),
-    #                                             l2l.data.transforms.KShots(train, 2 * shots),
-    #                                             l2l.data.transforms.LoadData(train),
-    #                                             l2l.data.transforms.RemapLabels(train),
-    #                                             l2l.data.transforms.ConsecutiveLabels(train),
-    #                                        ],
-    #                                        num_tasks=50)
-    #     # Sanity check
-    #     train_tasks.sample()
-
-    model = Net(roberta)
-    # model.to(device)
-    meta_model = l2l.algorithms.MAML(model, lr=maml_lr)
-    opt = optim.Adam(meta_model.parameters(), lr=lr)
-    loss_func = nn.CrossEntropyLoss()
-
-    for iteration in range(iterations):
-        iteration_error = 0.0
-        iteration_acc = 0.0
-
-        print('\n\n### Dataset: ' + datasets[iteration] + '###\n\n')
-
-        train = l2l.data.MetaDataset(MAMLDataset(datasets[iteration]))
+    train_tasks_collection = []
+    for idx in range(len(datasets)):
+        print('\n\n### Dataset: ' + datasets[idx] + '###\n\n')
+        train = l2l.data.MetaDataset(MAMLDataset(datasets[idx]))
 
         train_tasks = l2l.data.TaskDataset(train,
                                            task_transforms=[
@@ -181,10 +158,28 @@ def main(lr=0.005, maml_lr=0.01, iterations=1000, ways=2, shots=5, tps=32, fas=5
                                                 l2l.data.transforms.ConsecutiveLabels(train),
                                            ],
                                            num_tasks=50)
+        train_tasks_collection.append(train_tasks)
 
-        for _ in range(tps):
+    model = Net(roberta)
+    # model.to(device)
+    meta_model = l2l.algorithms.MAML(model, lr=maml_lr)
+
+    # How to Train Your MAML
+    opt = optim.Adam(meta_model.parameters(), lr=lr)
+    opt = torch.optim.lr_scheduler.CosineAnnealingLR(opt, iterations, eta_min=0, last_epoch=-1)
+
+    loss_func = nn.CrossEntropyLoss()
+
+    for iteration in range(iterations):
+        iteration_error = 0.0
+        iteration_acc = 0.0
+
+        train_tasks_sampled = random.sample(train_tasks_collection, tps)
+
+        for i in range(tps):
             learner = meta_model.clone()
-            train_task = train_tasks.sample()
+            train_task = train_tasks_sampled[i].sample()
+            print(len(train_task))
             data, labels = train_task
             # data = data.to(device)
             # labels = labels.to(device)
@@ -210,16 +205,17 @@ def main(lr=0.005, maml_lr=0.01, iterations=1000, ways=2, shots=5, tps=32, fas=5
                 train_error = loss_func(learner(adaptation_data), adaptation_labels)
                 learner.adapt(train_error, allow_unused=True, allow_nograd=True)
 
-            # Compute validation loss
-            predictions = learner(evaluation_data)
-            valid_error = loss_func(predictions, evaluation_labels)
-            valid_error /= len(evaluation_data)
-            valid_accuracy = accuracy(predictions, evaluation_labels)
-            iteration_error += valid_error
-            iteration_acc += valid_accuracy
+                # Compute validation loss
+                # MAML MSL
+                predictions = learner(evaluation_data)
+                valid_error = loss_func(predictions, evaluation_labels)
+                valid_error /= len(evaluation_data)
+                valid_accuracy = accuracy(predictions, evaluation_labels)
+                iteration_error += valid_error
+                iteration_acc += valid_accuracy
 
-        iteration_error /= tps
-        iteration_acc /= tps
+        iteration_error /= (tps * fas)
+        iteration_acc /= (tps * fas)
         print('Loss : {:.3f} Acc : {:.3f}'.format(iteration_error.item(), iteration_acc))
 
         # Take the meta-learning step
@@ -227,6 +223,74 @@ def main(lr=0.005, maml_lr=0.01, iterations=1000, ways=2, shots=5, tps=32, fas=5
         iteration_error.backward()
         opt.step()
 
+    torch.save(model.state_dict(), './models/maml.pt')
+
+def pretrain(lr=0.005, iterations=1000, shots=5, fas=5, device=torch.device("cpu")):
+
+    roberta = torch.hub.load('pytorch/fairseq', 'roberta.large')
+    pretrain_dataset = MAMLDataset('detecting-insults-in-social-commentary', batch_size=2*shots, shuffle=True)
+
+    model = Net(roberta)
+    # model.to(device)
+    opt = optim.Adam(model.parameters(), lr=lr)
+
+    loss_func = nn.CrossEntropyLoss()
+
+    for iteration in range(iterations):
+        iteration_error = 0.0
+        iteration_acc = 0.0
+
+        data, labels = next(iter(pretrain_dataset))
+        for step in range(fas):
+            predictions = model(data)
+            train_error = loss_func(predictions, labels)
+            train_acc = accuracy(predictions, labels)
+
+            opt.zero_grad()
+            train_error.backward()
+            for param in opt.parameters():
+                param.data = param.data - lr * param.grad.data
+            iteration_error += train_error / len(data)
+            iteration_acc += train_acc
+
+        iteration_error /= fas
+        iteration_acc /= fas
+        print('Loss : {:.3f} Acc : {:.3f}'.format(iteration_error.item(), iteration_acc))
+
+    torch.save(model.state_dict(), './models/pretrain.pt')
+
+def train(lr=0.005, iterations=1000, shots=5, device=torch.device("cpu"), filepath='./models/maml.pt'):
+
+    train_dataset = MAMLDataset('twitter-sentiment-analysis-hatred-speech', batch_size=2*shots, shuffle=True)
+    test_dataset = MAMLDataset('hate-speech-dataset-master', batch_size=2*shots, shuffle=True)
+
+    model = torch.load(filepath)
+    # model.to(device)
+    opt = optim.Adam(model.parameters(), lr=lr)
+
+    loss_func = nn.CrossEntropyLoss()
+
+    for iteration in range(iterations):
+        train_data, train_labels = next(iter(train_dataset))
+        test_data, test_labels = next(iter(test_dataset))
+
+        train_predictions = model(train_data)
+        train_error = loss_func(train_predictions, train_labels)
+        train_acc = accuracy(train_predictions, train_labels)
+
+        opt.zero_grad()
+        train_error.backward()
+        for param in opt.parameters():
+            param.data = param.data - lr * param.grad.data
+
+        test_predictions = model(test_data)
+        test_error = loss_func(test_predictions, test_labels)
+        test_acc = accuracy(test_predictions, test_labels)
+
+        train_error /= len(data)
+        test_error /= len(data)
+        print('Train Loss : {:.3f} Train Acc : {:.3f}'.format(train_error.item(), train_acc))
+        print('Test Loss : {:.3f} Test Acc : {:.3f}'.format(test_error.item(), test_acc))
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Learn2Learn SST Example')
@@ -235,8 +299,8 @@ if __name__ == '__main__':
                         help='number of ways (default: 2)')
     parser.add_argument('--shots', type=int, default=5, metavar='N',
                         help='number of shots (default: 5)')
-    parser.add_argument('-tps', '--tasks-per-step', type=int, default=32, metavar='N',
-                        help='tasks per step (default: 32)')
+    parser.add_argument('-tps', '--tasks-per-step', type=int, default=5, metavar='N',
+                        help='tasks per step (default: 5)')
     parser.add_argument('-fas', '--fast-adaption-steps', type=int, default=5, metavar='N',
                         help='steps per fast adaption (default: 5)')
 
@@ -254,9 +318,6 @@ if __name__ == '__main__':
     parser.add_argument('--seed', type=int, default=1, metavar='S',
                         help='random seed (default: 1)')
 
-    parser.add_argument('--download-location', type=str, default="/tmp/mnist", metavar='S',
-                        help='download location for train data (default : /tmp/mnist')
-
     args = parser.parse_args()
 
     use_cuda = not args.no_cuda and torch.cuda.is_available()
@@ -271,12 +332,22 @@ if __name__ == '__main__':
 
     device = torch.device("cuda" if use_cuda else "cpu")
 
-    main(lr=args.lr,
+    maml(lr=args.lr,
          maml_lr=args.maml_lr,
          iterations=args.iterations,
          ways=args.ways,
          shots=args.shots,
          tps=args.tasks_per_step,
          fas=args.fast_adaption_steps,
-         device=device,
-         download_location=args.download_location)
+         device=device)
+
+    pretrain(lr=args.lr,
+         iterations=args.iterations,
+         shots=args.shots,
+         fas=args.fast_adaption_steps,
+         device=device)
+
+    pretrain(lr=args.lr,
+         iterations=args.iterations,
+         shots=args.shots,
+         device=device)
