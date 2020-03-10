@@ -137,12 +137,13 @@ class MAMLDataset(Dataset):
 
         return (tokens, labels)
 
-def maml(lr=0.005, maml_lr=0.01, iterations=1000, ways=2, shots=5, tps=5, fas=5, device=torch.device("cpu")):
+def maml(lr=0.005, maml_lr=0.01, iterations=5, ways=2, shots=5, tps=5, fas=5, device=torch.device("cpu")):
 
     roberta = torch.hub.load('pytorch/fairseq', 'roberta.large')
     datasets = ['SST', 'toxic_comment', '4054689', 'detecting-insults-in-social-commentary', \
                 'hate-speech-and-offensive-language', 'hate-speech-dataset-master', \
                 'quora-insincere-questions-classification', 'twitter-sentiment-analysis-hatred-speech']
+    # smoketest_datasets = ['SST', 'toxic_comment']
 
     train_tasks_collection = []
     for idx in range(len(datasets)):
@@ -164,9 +165,8 @@ def maml(lr=0.005, maml_lr=0.01, iterations=1000, ways=2, shots=5, tps=5, fas=5,
     # model.to(device)
     meta_model = l2l.algorithms.MAML(model, lr=maml_lr)
 
-    # How to Train Your MAML
     opt = optim.Adam(meta_model.parameters(), lr=lr)
-    opt = torch.optim.lr_scheduler.CosineAnnealingLR(opt, iterations, eta_min=0, last_epoch=-1)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(opt, iterations, eta_min=0, last_epoch=-1)
 
     loss_func = nn.CrossEntropyLoss()
 
@@ -177,10 +177,13 @@ def maml(lr=0.005, maml_lr=0.01, iterations=1000, ways=2, shots=5, tps=5, fas=5,
         train_tasks_sampled = random.sample(train_tasks_collection, tps)
 
         for i in range(tps):
+            iteration_errors = torch.zeros(tps * fas)
+            error_weights = torch.rand(tps * fas, requires_grad=True)
+
             learner = meta_model.clone()
             train_task = train_tasks_sampled[i].sample()
-            print(len(train_task))
             data, labels = train_task
+            print(len(data))
             # data = data.to(device)
             # labels = labels.to(device)
 
@@ -211,10 +214,12 @@ def maml(lr=0.005, maml_lr=0.01, iterations=1000, ways=2, shots=5, tps=5, fas=5,
                 valid_error = loss_func(predictions, evaluation_labels)
                 valid_error /= len(evaluation_data)
                 valid_accuracy = accuracy(predictions, evaluation_labels)
-                iteration_error += valid_error
+                iteration_errors[fas * i + step] = valid_error
                 iteration_acc += valid_accuracy
 
-        iteration_error /= (tps * fas)
+            iteration_error += torch.dot(error_weights, iteration_errors)
+
+        iteration_error /= tps
         iteration_acc /= (tps * fas)
         print('Loss : {:.3f} Acc : {:.3f}'.format(iteration_error.item(), iteration_acc))
 
@@ -222,13 +227,19 @@ def maml(lr=0.005, maml_lr=0.01, iterations=1000, ways=2, shots=5, tps=5, fas=5,
         opt.zero_grad()
         iteration_error.backward()
         opt.step()
+        scheduler.step()
+
+        error_weights.data = error_weights.data - lr * error_weights.grad.data
+
 
     torch.save(model.state_dict(), './models/maml.pt')
 
-def pretrain(lr=0.005, iterations=1000, shots=5, fas=5, device=torch.device("cpu")):
+def pretrain(lr=0.005, iterations=5, shots=5, fas=5, device=torch.device("cpu")):
 
     roberta = torch.hub.load('pytorch/fairseq', 'roberta.large')
-    pretrain_dataset = MAMLDataset('detecting-insults-in-social-commentary', batch_size=2*shots, shuffle=True)
+    pretrain_data = MAMLDataset('hate-speech-dataset-master')
+    pretrain_dataset = DataLoader(pretrain_data, batch_size=2*2*shots, shuffle=True)
+    iter_pretrain_dataset = iter(pretrain_dataset)
 
     model = Net(roberta)
     # model.to(device)
@@ -240,7 +251,16 @@ def pretrain(lr=0.005, iterations=1000, shots=5, fas=5, device=torch.device("cpu
         iteration_error = 0.0
         iteration_acc = 0.0
 
-        data, labels = next(iter(pretrain_dataset))
+        data, labels = None, None
+        try:
+            data, labels = next(iter_pretrain_dataset)
+        except:
+            pretrain_dataset = DataLoader(pretrain_data, batch_size=2*2*shots, shuffle=True)
+            iter_pretrain_dataset = iter(pretrain_dataset)
+            data, labels = next(iter_pretrain_dataset)
+
+        data = [roberta.encode(elem)[:roberta.model.max_positions()] for elem in data]
+        labels = torch.LongTensor(labels)
         for step in range(fas):
             predictions = model(data)
             train_error = loss_func(predictions, labels)
@@ -248,8 +268,9 @@ def pretrain(lr=0.005, iterations=1000, shots=5, fas=5, device=torch.device("cpu
 
             opt.zero_grad()
             train_error.backward()
-            for param in opt.parameters():
-                param.data = param.data - lr * param.grad.data
+            for param in model.parameters():
+                if param.grad is not None:
+                    param.data = param.data - lr * param.grad.data
             iteration_error += train_error / len(data)
             iteration_acc += train_acc
 
@@ -259,20 +280,40 @@ def pretrain(lr=0.005, iterations=1000, shots=5, fas=5, device=torch.device("cpu
 
     torch.save(model.state_dict(), './models/pretrain.pt')
 
-def train(lr=0.005, iterations=1000, shots=5, device=torch.device("cpu"), filepath='./models/maml.pt'):
+def train(lr=0.005, iterations=5, shots=5, device=torch.device("cpu"), filepath='./models/maml.pt'):
 
-    train_dataset = MAMLDataset('twitter-sentiment-analysis-hatred-speech', batch_size=2*shots, shuffle=True)
-    test_dataset = MAMLDataset('hate-speech-dataset-master', batch_size=2*shots, shuffle=True)
+    roberta = torch.hub.load('pytorch/fairseq', 'roberta.large')
+    data = MAMLDataset('twitter-sentiment-analysis-hatred-speech')
 
-    model = torch.load(filepath)
+    # 90-10 train-test split
+    train_size = 9 * len(data) // 10
+    test_size = len(data) - train_size
+    train_data_split, test_data_split = torch.utils.data.random_split(data, [train_size, test_size])
+
+    train_dataset = DataLoader(train_data_split, batch_size=2*2*shots, shuffle=True)
+    iter_train_dataset = iter(train_dataset)
+
+    test_dataset = DataLoader(test_data_split, batch_size=len(test_data_split))
+
+    model = Net(roberta)
+    model.load_state_dict(torch.load(filepath))
     # model.to(device)
     opt = optim.Adam(model.parameters(), lr=lr)
 
     loss_func = nn.CrossEntropyLoss()
 
     for iteration in range(iterations):
-        train_data, train_labels = next(iter(train_dataset))
-        test_data, test_labels = next(iter(test_dataset))
+
+        train_data, train_labels = None, None
+        try:
+            train_data, train_labels = next(iter(train_dataset))
+        except:
+            train_dataset = DataLoader(train_data, batch_size=2*2*shots, shuffle=True)
+            iter_train_dataset = iter(train_dataset)
+            train_data, train_labels = next(iter(train_dataset))
+
+        train_data = [roberta.encode(elem)[:roberta.model.max_positions()] for elem in train_data]
+        train_labels = torch.LongTensor(train_labels)
 
         train_predictions = model(train_data)
         train_error = loss_func(train_predictions, train_labels)
@@ -280,16 +321,21 @@ def train(lr=0.005, iterations=1000, shots=5, device=torch.device("cpu"), filepa
 
         opt.zero_grad()
         train_error.backward()
-        for param in opt.parameters():
-            param.data = param.data - lr * param.grad.data
+        for param in model.parameters():
+            if param.grad is not None:
+                param.data = param.data - lr * param.grad.data
+        train_error /= len(train_data)
+        print('Train Loss : {:.3f} Train Acc : {:.3f}'.format(train_error.item(), train_acc))
+
+        test_data, test_labels = next(iter(test_dataset))
+        test_data = [roberta.encode(elem)[:roberta.model.max_positions()] for elem in test_data]
+        test_labels = torch.LongTensor(test_labels)
 
         test_predictions = model(test_data)
         test_error = loss_func(test_predictions, test_labels)
         test_acc = accuracy(test_predictions, test_labels)
 
-        train_error /= len(data)
-        test_error /= len(data)
-        print('Train Loss : {:.3f} Train Acc : {:.3f}'.format(train_error.item(), train_acc))
+        test_error /= len(test_data)
         print('Test Loss : {:.3f} Test Acc : {:.3f}'.format(test_error.item(), test_acc))
 
 if __name__ == '__main__':
@@ -304,8 +350,8 @@ if __name__ == '__main__':
     parser.add_argument('-fas', '--fast-adaption-steps', type=int, default=5, metavar='N',
                         help='steps per fast adaption (default: 5)')
 
-    parser.add_argument('--iterations', type=int, default=1000, metavar='N',
-                        help='number of iterations (default: 1000)')
+    parser.add_argument('--iterations', type=int, default=5, metavar='N',
+                        help='number of iterations (default: 5)')
 
     parser.add_argument('--lr', type=float, default=0.005, metavar='LR',
                         help='learning rate (default: 0.005)')
@@ -347,7 +393,7 @@ if __name__ == '__main__':
          fas=args.fast_adaption_steps,
          device=device)
 
-    pretrain(lr=args.lr,
+    train(lr=args.lr,
          iterations=args.iterations,
          shots=args.shots,
          device=device)
