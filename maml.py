@@ -3,6 +3,7 @@
 import argparse
 import random
 import pandas as pd
+import pickle
 
 import numpy as np
 import torch
@@ -142,8 +143,8 @@ def maml(lr=0.005, maml_lr=0.01, iterations=5, ways=2, shots=5, tps=5, fas=5, de
     roberta = torch.hub.load('pytorch/fairseq', 'roberta.large')
     datasets = ['SST', 'toxic_comment', '4054689', 'detecting-insults-in-social-commentary', \
                 'hate-speech-and-offensive-language', 'hate-speech-dataset-master', \
-                'quora-insincere-questions-classification', 'twitter-sentiment-analysis-hatred-speech']
-    # smoketest_datasets = ['SST', 'toxic_comment']
+                'quora-insincere-questions-classification']
+    # smoketest_datasets = ['SST', 'twitter-sentiment-analysis-hatred-speech']
 
     train_tasks_collection = []
     for idx in range(len(datasets)):
@@ -280,7 +281,7 @@ def pretrain(lr=0.005, iterations=5, shots=5, fas=5, device=torch.device("cpu"))
 
     torch.save(model.state_dict(), './models/pretrain.pt')
 
-def train(lr=0.005, iterations=5, shots=5, device=torch.device("cpu"), filepath='./models/maml.pt'):
+def train(lr=0.005, iterations=5, shots=5, device=torch.device("cpu"), filepath=None):
 
     roberta = torch.hub.load('pytorch/fairseq', 'roberta.large')
     data = MAMLDataset('twitter-sentiment-analysis-hatred-speech')
@@ -296,11 +297,18 @@ def train(lr=0.005, iterations=5, shots=5, device=torch.device("cpu"), filepath=
     test_dataset = DataLoader(test_data_split, batch_size=len(test_data_split))
 
     model = Net(roberta)
-    model.load_state_dict(torch.load(filepath))
+    if filepath is not None:
+        model.load_state_dict(torch.load(filepath))
     # model.to(device)
     opt = optim.Adam(model.parameters(), lr=lr)
 
     loss_func = nn.CrossEntropyLoss()
+
+    train_accs = []
+    test_accs = []
+
+    train_losses = []
+    test_losses = []
 
     for iteration in range(iterations):
 
@@ -324,7 +332,7 @@ def train(lr=0.005, iterations=5, shots=5, device=torch.device("cpu"), filepath=
         for param in model.parameters():
             if param.grad is not None:
                 param.data = param.data - lr * param.grad.data
-        train_error /= len(train_data)
+        # train_error /= len(train_data)
         print('Train Loss : {:.3f} Train Acc : {:.3f}'.format(train_error.item(), train_acc))
 
         test_data, test_labels = next(iter(test_dataset))
@@ -335,8 +343,28 @@ def train(lr=0.005, iterations=5, shots=5, device=torch.device("cpu"), filepath=
         test_error = loss_func(test_predictions, test_labels)
         test_acc = accuracy(test_predictions, test_labels)
 
-        test_error /= len(test_data)
+        # test_error /= len(test_data)
         print('Test Loss : {:.3f} Test Acc : {:.3f}'.format(test_error.item(), test_acc))
+
+        train_losses.append(train_error)
+        test_losses.append(test_error)
+
+        train_accs.append(train_acc)
+        test_accs.append(test_acc)
+
+    suffix = ''
+    if filepath == './models/maml.pt':
+        suffix = 'maml'
+    elif filepath == './models/pretrain.pt':
+        suffix = 'pretrain'
+    with open('./models/train_losses_' + suffix + '.pkl', 'wb') as f:
+        pickle.dump(train_losses, f)
+    with open('./models/train_accs_' + suffix + '.pkl', 'wb') as f:
+        pickle.dump(train_accs, f)
+    with open('./models/test_losses_' + suffix + '.pkl', 'wb') as f:
+        pickle.dump(test_losses, f)
+    with open('./models/test_accs_' + suffix + '.pkl', 'wb') as f:
+        pickle.dump(test_accs, f)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Learn2Learn SST Example')
@@ -396,4 +424,17 @@ if __name__ == '__main__':
     train(lr=args.lr,
          iterations=args.iterations,
          shots=args.shots,
-         device=device)
+         device=device,
+         filepath='./models/maml.pt')
+
+    train(lr=args.lr,
+         iterations=args.iterations,
+         shots=args.shots,
+         device=device,
+         filepath='./models/pretrain.pt')
+
+    train(lr=args.lr,
+         iterations=args.iterations,
+         shots=args.shots,
+         device=device,
+         filepath=None)
