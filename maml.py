@@ -316,6 +316,7 @@ def train(lr=0.005, iterations=5, shots=5, device=torch.device("cpu"), filepath=
     train_data_split, test_data_split = torch.utils.data.random_split(data, [train_size, test_size])
 
     train_dataset = DataLoader(train_data_split, batch_size=2*2*shots, shuffle=True)
+    # train_dataset = DataLoader(train_data_split, batch_size=128, shuffle=True)
     iter_train_dataset = iter(train_dataset)
 
     test_dataset = DataLoader(test_data_split, batch_size=len(test_data_split))
@@ -340,7 +341,8 @@ def train(lr=0.005, iterations=5, shots=5, device=torch.device("cpu"), filepath=
         try:
             train_data, train_labels = next(iter(train_dataset))
         except:
-            train_dataset = DataLoader(train_data, batch_size=2*2*shots, shuffle=True)
+            train_dataset = DataLoader(train_data_split, batch_size=2*2*shots, shuffle=True)
+            # train_dataset = DataLoader(train_data_split, batch_size=128, shuffle=True)
             iter_train_dataset = iter(train_dataset)
             train_data, train_labels = next(iter(train_dataset))
 
@@ -364,32 +366,33 @@ def train(lr=0.005, iterations=5, shots=5, device=torch.device("cpu"), filepath=
         # train_error /= len(train_data)
         print('Train Loss : {:.3f} Train Acc : {:.3f}'.format(train_error.item(), train_acc))
 
-        test_data, test_labels = next(iter(test_dataset))
-        torch_test_data = torch.zeros((len(test_data), roberta.model.max_positions()), dtype=torch.long)
-        for i, elem in enumerate(test_data):
-            encoding = roberta.encode(elem)[:roberta.model.max_positions()]
-            torch_test_data[i, :len(encoding)] = encoding
-        torch_test_labels = torch.LongTensor(test_labels)
-        test_data = torch_test_data.to(device)
-        test_labels = torch_test_labels.to(device)
-
-        test_predictions = model(test_data)
-        test_error = loss_func(test_predictions, test_labels)
-        test_acc = accuracy(test_predictions, test_labels)
-
-        # test_error /= len(test_data)
-        print('Test Loss : {:.3f} Test Acc : {:.3f}'.format(test_error.item(), test_acc))
-
         train_losses.append(train_error)
-        test_losses.append(test_error)
-
         train_accs.append(train_acc)
-        test_accs.append(test_acc)
 
         del train_data
         del train_labels
-        del test_data
-        del test_labels
+
+    test_data, test_labels = next(iter(test_dataset))
+    torch_test_data = torch.zeros((len(test_data), roberta.model.max_positions()), dtype=torch.long)
+    for i, elem in enumerate(test_data):
+        encoding = roberta.encode(elem)[:roberta.model.max_positions()]
+        torch_test_data[i, :len(encoding)] = encoding
+    torch_test_labels = torch.LongTensor(test_labels)
+    test_data = torch_test_data.to(device)
+    test_labels = torch_test_labels.to(device)
+
+    test_predictions = model(test_data)
+    test_error = loss_func(test_predictions, test_labels)
+    test_acc = accuracy(test_predictions, test_labels)
+
+    test_losses.append(test_error)
+    test_accs.append(test_acc)
+
+    # test_error /= len(test_data)
+    print('Test Loss : {:.3f} Test Acc : {:.3f}'.format(test_error.item(), test_acc))
+
+    del test_data
+    del test_labels
 
     suffix = ''
     if filepath == './models/maml.pt':
@@ -447,22 +450,22 @@ if __name__ == '__main__':
 
     device = torch.device("cuda" if use_cuda else "cpu")
 
-    print("Training MAML")
-    maml(lr=args.lr,
-         maml_lr=args.maml_lr,
-         iterations=args.iterations,
-         ways=args.ways,
-         shots=args.shots,
-         tps=args.tasks_per_step,
-         fas=args.fast_adaption_steps,
-         device=device)
+    # print("Training MAML")
+    # maml(lr=args.lr,
+    #      maml_lr=args.maml_lr,
+    #      iterations=args.iterations,
+    #      ways=args.ways,
+    #      shots=args.shots,
+    #      tps=args.tasks_per_step,
+    #      fas=args.fast_adaption_steps,
+    #      device=device)
 
-    print("Training pretrain")
-    pretrain(lr=args.lr,
-         iterations=args.iterations,
-         shots=args.shots,
-         fas=args.fast_adaption_steps,
-         device=device)
+    # print("Training pretrain")
+    # pretrain(lr=args.lr,
+    #      iterations=args.iterations,
+    #      shots=args.shots,
+    #      fas=args.fast_adaption_steps,
+    #      device=device)
 
     print("Training from MAML")
     train(lr=args.lr,
