@@ -311,7 +311,7 @@ def train(lr=0.005, iterations=5, shots=5, device=torch.device("cpu"), filepath=
     data = MAMLDataset('twitter-sentiment-analysis-hatred-speech')
 
     # 90-10 train-test split
-    train_size = 9 * len(data) // 10
+    train_size = 6 * len(data) // 10
     test_size = len(data) - train_size
     train_data_split, test_data_split = torch.utils.data.random_split(data, [train_size, test_size])
 
