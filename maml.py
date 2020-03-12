@@ -163,7 +163,7 @@ def maml(lr=0.005, maml_lr=0.01, iterations=5, ways=2, shots=5, tps=5, fas=5, de
         train_tasks_collection.append(train_tasks)
 
     model = Net(roberta)
-    # model.to(device)
+    model.to(device)
     meta_model = l2l.algorithms.MAML(model, lr=maml_lr)
 
     opt = optim.Adam(meta_model.parameters(), lr=lr)
@@ -184,9 +184,6 @@ def maml(lr=0.005, maml_lr=0.01, iterations=5, ways=2, shots=5, tps=5, fas=5, de
             learner = meta_model.clone()
             train_task = train_tasks_sampled[i].sample()
             data, labels = train_task
-            print(len(data))
-            # data = data.to(device)
-            # labels = labels.to(device)
 
             # Separate data into adaptation/evalutation sets
             adaptation_indices = np.zeros(len(data), dtype=bool)
@@ -197,12 +194,22 @@ def maml(lr=0.005, maml_lr=0.01, iterations=5, ways=2, shots=5, tps=5, fas=5, de
             labels = np.array(labels)
 
             adaptation_data, adaptation_labels = data[adaptation_indices], labels[adaptation_indices]
-            adaptation_data = [roberta.encode(elem)[:roberta.model.max_positions()] for elem in adaptation_data]
-            adaptation_labels = torch.LongTensor(adaptation_labels)
+            torch_adaptation_data = torch.zeros((len(adaptation_data), roberta.model.max_positions()), dtype=torch.long)
+            for i, elem in enumerate(adaptation_data):
+                encoding = roberta.encode(elem)[:roberta.model.max_positions()]
+                torch_adaptation_data[i, :len(encoding)] = encoding
+            adaptation_data = torch_adaptation_data.to(device)
+            torch_adaptation_labels = torch.LongTensor(adaptation_labels)
+            adaptation_labels = torch_labels.to(device)
 
             evaluation_data, evaluation_labels = data[evaluation_indices], labels[evaluation_indices]
-            evaluation_data = [roberta.encode(elem)[:roberta.model.max_positions()] for elem in evaluation_data]
-            evaluation_labels = torch.LongTensor(evaluation_labels)
+            torch_evaluation_data = torch.zeros((len(evaluation_data), roberta.model.max_positions()), dtype=torch.long)
+            for i, elem in enumerate(evaluation_data):
+                encoding = roberta.encode(elem)[:roberta.model.max_positions()]
+                torch_evaluation_data[i, :len(encoding)] = encoding
+            evaluation_data = torch_evaluation_data.to(device)
+            torch_evaluation_labels = torch.LongTensor(evaluation_labels)
+            evaluation_labels = torch_labels.to(device)
 
             # Fast Adaptation
             for step in range(fas):
@@ -219,6 +226,11 @@ def maml(lr=0.005, maml_lr=0.01, iterations=5, ways=2, shots=5, tps=5, fas=5, de
                 iteration_acc += valid_accuracy
 
             iteration_error += torch.dot(error_weights, iteration_errors)
+
+            del adaptation_data
+            del adaptation_labels
+            del evaluation_data
+            del evaluation_labels
 
         iteration_error /= tps
         iteration_acc /= (tps * fas)
@@ -243,7 +255,7 @@ def pretrain(lr=0.005, iterations=5, shots=5, fas=5, device=torch.device("cpu"))
     iter_pretrain_dataset = iter(pretrain_dataset)
 
     model = Net(roberta)
-    # model.to(device)
+    model.to(device)
     opt = optim.Adam(model.parameters(), lr=lr)
 
     loss_func = nn.CrossEntropyLoss()
@@ -260,8 +272,14 @@ def pretrain(lr=0.005, iterations=5, shots=5, fas=5, device=torch.device("cpu"))
             iter_pretrain_dataset = iter(pretrain_dataset)
             data, labels = next(iter_pretrain_dataset)
 
-        data = [roberta.encode(elem)[:roberta.model.max_positions()] for elem in data]
-        labels = torch.LongTensor(labels)
+        torch_data = torch.zeros((len(data), roberta.model.max_positions()), dtype=torch.long)
+        for i, elem in enumerate(data):
+            encoding = roberta.encode(elem)[:roberta.model.max_positions()]
+            torch_data[i, :len(encoding)] = encoding
+        torch_labels = torch.LongTensor(labels)
+        data = torch_data.to(device)
+        labels = torch_labels.to(device)
+
         for step in range(fas):
             predictions = model(data)
             train_error = loss_func(predictions, labels)
@@ -299,7 +317,7 @@ def train(lr=0.005, iterations=5, shots=5, device=torch.device("cpu"), filepath=
     model = Net(roberta)
     if filepath is not None:
         model.load_state_dict(torch.load(filepath))
-    # model.to(device)
+    model.to(device)
     opt = optim.Adam(model.parameters(), lr=lr)
 
     loss_func = nn.CrossEntropyLoss()
@@ -320,8 +338,13 @@ def train(lr=0.005, iterations=5, shots=5, device=torch.device("cpu"), filepath=
             iter_train_dataset = iter(train_dataset)
             train_data, train_labels = next(iter(train_dataset))
 
-        train_data = [roberta.encode(elem)[:roberta.model.max_positions()] for elem in train_data]
-        train_labels = torch.LongTensor(train_labels)
+        torch_train_data = torch.zeros((len(train_data), roberta.model.max_positions()), dtype=torch.long)
+        for i, elem in enumerate(train_data):
+            encoding = roberta.encode(elem)[:roberta.model.max_positions()]
+            torch_train_data[i, :len(encoding)] = encoding
+        torch_train_labels = torch.LongTensor(train_labels)
+        train_data = torch_train_data.to(device)
+        train_labels = torch_train_labels.to(device)
 
         train_predictions = model(train_data)
         train_error = loss_func(train_predictions, train_labels)
@@ -335,9 +358,14 @@ def train(lr=0.005, iterations=5, shots=5, device=torch.device("cpu"), filepath=
         # train_error /= len(train_data)
         print('Train Loss : {:.3f} Train Acc : {:.3f}'.format(train_error.item(), train_acc))
 
-        test_data, test_labels = next(iter(test_dataset))
-        test_data = [roberta.encode(elem)[:roberta.model.max_positions()] for elem in test_data]
-        test_labels = torch.LongTensor(test_labels)
+        test_data, test_test_labels = next(iter(test_dataset))
+        torch_test_data = torch.zeros((len(test_data), roberta.model.max_positions()), dtype=torch.long)
+        for i, elem in enumerate(test_data):
+            encoding = roberta.encode(elem)[:roberta.model.max_positions()]
+            torch_test_data[i, :len(encoding)] = encoding
+        torch_test_labels = torch.LongTensor(test_labels)
+        test_data = torch_test_data.to(device)
+        test_labels = torch_test_labels.to(device)
 
         test_predictions = model(test_data)
         test_error = loss_func(test_predictions, test_labels)
