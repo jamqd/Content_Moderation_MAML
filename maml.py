@@ -139,12 +139,13 @@ class MAMLDataset(Dataset):
         return (tokens, labels)
 
 def maml(lr=0.005, maml_lr=0.01, iterations=5, ways=2, shots=5, tps=5, fas=5, device=torch.device("cpu")):
-
+    
     roberta = torch.hub.load('pytorch/fairseq', 'roberta.large')
     datasets = ['SST', 'toxic_comment', '4054689', 'detecting-insults-in-social-commentary', \
                 'hate-speech-and-offensive-language', 'hate-speech-dataset-master', \
                 'quora-insincere-questions-classification']
-    # smoketest_datasets = ['SST', 'twitter-sentiment-analysis-hatred-speech']
+    # datasets = ['SST', 'twitter-sentiment-analysis-hatred-speech']
+    # tps = 2
 
     train_tasks_collection = []
     for idx in range(len(datasets)):
@@ -163,7 +164,6 @@ def maml(lr=0.005, maml_lr=0.01, iterations=5, ways=2, shots=5, tps=5, fas=5, de
         train_tasks_collection.append(train_tasks)
 
     model = Net(roberta)
-    model.to(device)
     meta_model = l2l.algorithms.MAML(model, lr=maml_lr)
 
     opt = optim.Adam(meta_model.parameters(), lr=lr)
@@ -177,12 +177,13 @@ def maml(lr=0.005, maml_lr=0.01, iterations=5, ways=2, shots=5, tps=5, fas=5, de
 
         train_tasks_sampled = random.sample(train_tasks_collection, tps)
 
-        for i in range(tps):
+        for tps_i in range(tps):
             iteration_errors = torch.zeros(tps * fas)
             error_weights = torch.rand(tps * fas, requires_grad=True)
 
             learner = meta_model.clone()
-            train_task = train_tasks_sampled[i].sample()
+            learner.to(device)
+            train_task = train_tasks_sampled[tps_i].sample()
             data, labels = train_task
 
             # Separate data into adaptation/evalutation sets
@@ -200,7 +201,7 @@ def maml(lr=0.005, maml_lr=0.01, iterations=5, ways=2, shots=5, tps=5, fas=5, de
                 torch_adaptation_data[i, :len(encoding)] = encoding
             adaptation_data = torch_adaptation_data.to(device)
             torch_adaptation_labels = torch.LongTensor(adaptation_labels)
-            adaptation_labels = torch_labels.to(device)
+            adaptation_labels = torch_adaptation_labels.to(device)
 
             evaluation_data, evaluation_labels = data[evaluation_indices], labels[evaluation_indices]
             torch_evaluation_data = torch.zeros((len(evaluation_data), roberta.model.max_positions()), dtype=torch.long)
@@ -209,7 +210,7 @@ def maml(lr=0.005, maml_lr=0.01, iterations=5, ways=2, shots=5, tps=5, fas=5, de
                 torch_evaluation_data[i, :len(encoding)] = encoding
             evaluation_data = torch_evaluation_data.to(device)
             torch_evaluation_labels = torch.LongTensor(evaluation_labels)
-            evaluation_labels = torch_labels.to(device)
+            evaluation_labels = torch_evaluation_labels.to(device)
 
             # Fast Adaptation
             for step in range(fas):
@@ -222,7 +223,7 @@ def maml(lr=0.005, maml_lr=0.01, iterations=5, ways=2, shots=5, tps=5, fas=5, de
                 valid_error = loss_func(predictions, evaluation_labels)
                 valid_error /= len(evaluation_data)
                 valid_accuracy = accuracy(predictions, evaluation_labels)
-                iteration_errors[fas * i + step] = valid_error
+                iteration_errors[fas * tps_i + step] = valid_error
                 iteration_acc += valid_accuracy
 
             iteration_error += torch.dot(error_weights, iteration_errors)
@@ -231,6 +232,7 @@ def maml(lr=0.005, maml_lr=0.01, iterations=5, ways=2, shots=5, tps=5, fas=5, de
             del adaptation_labels
             del evaluation_data
             del evaluation_labels
+            del learner
 
         iteration_error /= tps
         iteration_acc /= (tps * fas)
@@ -297,7 +299,11 @@ def pretrain(lr=0.005, iterations=5, shots=5, fas=5, device=torch.device("cpu"))
         iteration_acc /= fas
         print('Loss : {:.3f} Acc : {:.3f}'.format(iteration_error.item(), iteration_acc))
 
+        del data
+        del labels
+
     torch.save(model.state_dict(), './models/pretrain.pt')
+    del model
 
 def train(lr=0.005, iterations=5, shots=5, device=torch.device("cpu"), filepath=None):
 
@@ -358,7 +364,7 @@ def train(lr=0.005, iterations=5, shots=5, device=torch.device("cpu"), filepath=
         # train_error /= len(train_data)
         print('Train Loss : {:.3f} Train Acc : {:.3f}'.format(train_error.item(), train_acc))
 
-        test_data, test_test_labels = next(iter(test_dataset))
+        test_data, test_labels = next(iter(test_dataset))
         torch_test_data = torch.zeros((len(test_data), roberta.model.max_positions()), dtype=torch.long)
         for i, elem in enumerate(test_data):
             encoding = roberta.encode(elem)[:roberta.model.max_positions()]
@@ -380,6 +386,11 @@ def train(lr=0.005, iterations=5, shots=5, device=torch.device("cpu"), filepath=
         train_accs.append(train_acc)
         test_accs.append(test_acc)
 
+        del train_data
+        del train_labels
+        del test_data
+        del test_labels
+
     suffix = ''
     if filepath == './models/maml.pt':
         suffix = 'maml'
@@ -393,6 +404,8 @@ def train(lr=0.005, iterations=5, shots=5, device=torch.device("cpu"), filepath=
         pickle.dump(test_losses, f)
     with open('./models/test_accs_' + suffix + '.pkl', 'wb') as f:
         pickle.dump(test_accs, f)
+    
+    del model
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Learn2Learn SST Example')
@@ -434,6 +447,7 @@ if __name__ == '__main__':
 
     device = torch.device("cuda" if use_cuda else "cpu")
 
+    print("Training MAML")
     maml(lr=args.lr,
          maml_lr=args.maml_lr,
          iterations=args.iterations,
@@ -443,24 +457,28 @@ if __name__ == '__main__':
          fas=args.fast_adaption_steps,
          device=device)
 
+    print("Training pretrain")
     pretrain(lr=args.lr,
          iterations=args.iterations,
          shots=args.shots,
          fas=args.fast_adaption_steps,
          device=device)
 
+    print("Training from MAML")
     train(lr=args.lr,
          iterations=args.iterations,
          shots=args.shots,
          device=device,
          filepath='./models/maml.pt')
 
+    print("Training from pretrain")
     train(lr=args.lr,
          iterations=args.iterations,
          shots=args.shots,
          device=device,
          filepath='./models/pretrain.pt')
 
+    print("Training from scratch")
     train(lr=args.lr,
          iterations=args.iterations,
          shots=args.shots,
